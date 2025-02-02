@@ -110,7 +110,7 @@ class TextAudioSpeakerLoader(torch.utils.data.Dataset):
         try:
             spec, wav = self.get_audio("%s/%s" % (self.path5, audiopath))
             with torch.no_grad():
-                ssl = torch.load("%s/%s.pt" % (self.path4, audiopath), map_location="cpu", weights_only=True))
+                ssl = torch.load("%s/%s.pt" % (self.path4, audiopath), map_location="cpu", weights_only=True)
                 if (ssl.shape[-1] != spec.shape[-1]):
                     typee = ssl.dtype
                     ssl = F.pad(ssl.float(), (0, 1), mode="replicate").to(typee)
