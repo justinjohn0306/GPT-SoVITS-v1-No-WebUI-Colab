@@ -34,18 +34,17 @@ from process_ckpt import savee
 
 torch.backends.cudnn.benchmark = False
 torch.backends.cudnn.deterministic = False
-###反正A100fp32更快，那试试tf32吧
+### A100 fp32 is faster so we try tf32
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
-torch.set_float32_matmul_precision("medium")  # 最低精度但最快（也就快一丁点），对于结果造成不了影响
-# from config import pretrained_s2G,pretrained_s2D
+torch.set_float32_matmul_precision("medium")  # lowest precision but fastest, results remain acceptable
+
 global_step = 0
 
-device = "cpu"  # cuda以外的设备，等mps优化后加入
+device = "cpu"  # fallback device (e.g., for mps in the future)
 
 
 def main():
-
     if torch.cuda.is_available():
         n_gpus = torch.cuda.device_count()
     else:
@@ -73,7 +72,7 @@ def run(rank, n_gpus, hps):
         writer_eval = SummaryWriter(log_dir=os.path.join(hps.s2_ckpt_dir, "eval"))
 
     dist.init_process_group(
-        backend = "gloo" if os.name == "nt" or not torch.cuda.is_available() else "nccl",
+        backend="gloo" if os.name == "nt" or not torch.cuda.is_available() else "nccl",
         init_method="env://",
         world_size=n_gpus,
         rank=rank,
@@ -127,7 +126,7 @@ def run(rank, n_gpus, hps):
     #                              batch_size=1, pin_memory=True,
     #                              drop_last=False, collate_fn=collate_fn)
 
-    net_g = SynthesizerTrn(
+    net_g = (SynthesizerTrn(
         hps.data.filter_length // 2 + 1,
         hps.train.segment_size // hps.data.hop_length,
         n_speakers=hps.data.n_speakers,
@@ -137,9 +136,10 @@ def run(rank, n_gpus, hps):
         hps.train.segment_size // hps.data.hop_length,
         n_speakers=hps.data.n_speakers,
         **hps.model,
-    ).to(device)
+    ).to(device))
 
-    net_d = MultiPeriodDiscriminator(hps.model.use_spectral_norm).cuda(rank) if torch.cuda.is_available() else MultiPeriodDiscriminator(hps.model.use_spectral_norm).to(device)
+    net_d = (MultiPeriodDiscriminator(hps.model.use_spectral_norm).cuda(rank) if torch.cuda.is_available() 
+             else MultiPeriodDiscriminator(hps.model.use_spectral_norm).to(device))
     for name, param in net_g.named_parameters():
         if not param.requires_grad:
             print(name, "not requires_grad")
@@ -152,12 +152,7 @@ def run(rank, n_gpus, hps):
         net_g.parameters(),
     )
 
-    # te_p=net_g.enc_p.text_embedding.parameters()
-    # et_p=net_g.enc_p.encoder_text.parameters()
-    # mrte_p=net_g.enc_p.mrte.parameters()
-
     optim_g = torch.optim.AdamW(
-        # filter(lambda p: p.requires_grad, net_g.parameters()),###默认所有层lr一致
         [
             {"params": base_params, "lr": hps.train.learning_rate},
             {
@@ -190,25 +185,21 @@ def run(rank, n_gpus, hps):
         net_g = net_g.to(device)
         net_d = net_d.to(device)
 
-    try:  # 如果能加载自动resume
+    try:  # Try to resume from checkpoints
         _, _, _, epoch_str = utils.load_checkpoint(
             utils.latest_checkpoint_path("%s/logs_s2" % hps.data.exp_dir, "D_*.pth"),
             net_d,
             optim_d,
-        )  # D多半加载没事
+        )  # For net_d
         if rank == 0:
             logger.info("loaded D")
-        # _, _, _, epoch_str = utils.load_checkpoint(utils.latest_checkpoint_path(hps.model_dir, "G_*.pth"), net_g, optim_g,load_opt=0)
         _, _, _, epoch_str = utils.load_checkpoint(
             utils.latest_checkpoint_path("%s/logs_s2" % hps.data.exp_dir, "G_*.pth"),
             net_g,
             optim_g,
         )
         global_step = (epoch_str - 1) * len(train_loader)
-        # epoch_str = 1
-        # global_step = 0
-    except:  # 如果首次不能加载，加载pretrain
-        # traceback.print_exc()
+    except:  # If no checkpoint is available, load pretrained weights if provided
         epoch_str = 1
         global_step = 0
         if hps.train.pretrained_s2G != "":
@@ -216,26 +207,23 @@ def run(rank, n_gpus, hps):
                 logger.info("loaded pretrained %s" % hps.train.pretrained_s2G)
             print(
                 net_g.module.load_state_dict(
-                    torch.load(hps.train.pretrained_s2G, map_location="cpu")["weight"],
+                    torch.load(hps.train.pretrained_s2G, map_location="cpu", weights_only=True)["weight"],
                     strict=False,
                 ) if torch.cuda.is_available() else net_g.load_state_dict(
-                    torch.load(hps.train.pretrained_s2G, map_location="cpu")["weight"],
+                    torch.load(hps.train.pretrained_s2G, map_location="cpu", weights_only=True)["weight"],
                     strict=False,
                 )
-            )  ##测试不加载优化器
+            )
         if hps.train.pretrained_s2D != "":
             if rank == 0:
                 logger.info("loaded pretrained %s" % hps.train.pretrained_s2D)
             print(
                 net_d.module.load_state_dict(
-                    torch.load(hps.train.pretrained_s2D, map_location="cpu")["weight"]
+                    torch.load(hps.train.pretrained_s2D, map_location="cpu", weights_only=True)["weight"]
                 ) if torch.cuda.is_available() else net_d.load_state_dict(
-                    torch.load(hps.train.pretrained_s2D, map_location="cpu")["weight"]
+                    torch.load(hps.train.pretrained_s2D, map_location="cpu", weights_only=True)["weight"]
                 )
             )
-
-    # scheduler_g = torch.optim.lr_scheduler.ExponentialLR(optim_g, gamma=hps.train.lr_decay, last_epoch=epoch_str - 2)
-    # scheduler_d = torch.optim.lr_scheduler.ExponentialLR(optim_d, gamma=hps.train.lr_decay, last_epoch=epoch_str - 2)
 
     scheduler_g = torch.optim.lr_scheduler.ExponentialLR(
         optim_g, gamma=hps.train.lr_decay, last_epoch=-1
@@ -259,7 +247,6 @@ def run(rank, n_gpus, hps):
                 [optim_g, optim_d],
                 [scheduler_g, scheduler_d],
                 scaler,
-                # [train_loader, eval_loader], logger, [writer, writer_eval])
                 [train_loader, None],
                 logger,
                 [writer, writer_eval],
@@ -286,7 +273,6 @@ def train_and_evaluate(
 ):
     net_g, net_d = nets
     optim_g, optim_d = optims
-    # scheduler_g, scheduler_d = schedulers
     train_loader, eval_loader = loaders
     if writers is not None:
         writer, writer_eval = writers
@@ -307,24 +293,16 @@ def train_and_evaluate(
         text_lengths,
     ) in tqdm(enumerate(train_loader)):
         if torch.cuda.is_available():
-            spec, spec_lengths = spec.cuda(rank, non_blocking=True), spec_lengths.cuda(
-                rank, non_blocking=True
-            )
-            y, y_lengths = y.cuda(rank, non_blocking=True), y_lengths.cuda(
-                rank, non_blocking=True
-            )
+            spec, spec_lengths = spec.cuda(rank, non_blocking=True), spec_lengths.cuda(rank, non_blocking=True)
+            y, y_lengths = y.cuda(rank, non_blocking=True), y_lengths.cuda(rank, non_blocking=True)
             ssl = ssl.cuda(rank, non_blocking=True)
             ssl.requires_grad = False
-            # ssl_lengths = ssl_lengths.cuda(rank, non_blocking=True)
-            text, text_lengths = text.cuda(rank, non_blocking=True), text_lengths.cuda(
-                rank, non_blocking=True
-            )
+            text, text_lengths = text.cuda(rank, non_blocking=True), text_lengths.cuda(rank, non_blocking=True)
         else:
             spec, spec_lengths = spec.to(device), spec_lengths.to(device)
             y, y_lengths = y.to(device), y_lengths.to(device)
             ssl = ssl.to(device)
             ssl.requires_grad = False
-            # ssl_lengths = ssl_lengths.cuda(rank, non_blocking=True)
             text, text_lengths = text.to(device), text_lengths.to(device)
 
         with autocast(enabled=hps.train.fp16_run):
@@ -364,7 +342,7 @@ def train_and_evaluate(
                 y, ids_slice * hps.data.hop_length, hps.train.segment_size
             )  # slice
 
-            # Discriminator
+            # Discriminator forward pass
             y_d_hat_r, y_d_hat_g, _, _ = net_d(y, y_hat.detach())
             with autocast(enabled=False):
                 loss_disc, losses_disc_r, losses_disc_g = discriminator_loss(
@@ -378,7 +356,7 @@ def train_and_evaluate(
         scaler.step(optim_d)
 
         with autocast(enabled=hps.train.fp16_run):
-            # Generator
+            # Generator forward pass
             y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = net_d(y, y_hat)
             with autocast(enabled=False):
                 loss_mel = F.l1_loss(y_mel, y_hat_mel) * hps.train.c_mel
@@ -422,9 +400,6 @@ def train_and_evaluate(
                     }
                 )
 
-                # scalar_dict.update({"loss/g/{}".format(i): v for i, v in enumerate(losses_gen)})
-                # scalar_dict.update({"loss/d_r/{}".format(i): v for i, v in enumerate(losses_disc_r)})
-                # scalar_dict.update({"loss/d_g/{}".format(i): v for i, v in enumerate(losses_disc_g)})
                 image_dict = {
                     "slice/mel_org": utils.plot_spectrogram_to_numpy(
                         y_mel[0].data.cpu().numpy()
@@ -537,11 +512,11 @@ def evaluate(hps, generator, eval_loader, writer_eval):
                 ssl = ssl.to(device)
                 text, text_lengths = text.to(device), text_lengths.to(device)
             for test in [0, 1]:
-                y_hat, mask, *_ = generator.module.infer(
+                y_hat, mask, *_ = (generator.module.infer(
                     ssl, spec, spec_lengths, text, text_lengths, test=test
                 ) if torch.cuda.is_available() else generator.infer(
                     ssl, spec, spec_lengths, text, text_lengths, test=test
-                )
+                ))
                 y_hat_lengths = mask.sum([1, 2]).long() * hps.data.hop_length
 
                 mel = spec_to_mel_torch(
