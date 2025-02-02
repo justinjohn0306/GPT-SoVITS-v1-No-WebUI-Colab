@@ -163,19 +163,19 @@ def run(rank, n_gpus, hps):
             if rank == 0:
                 logger.info("loaded pretrained %s" % hps.train.pretrained_s2G)
             print(net_g.module.load_state_dict(
-                torch.load(hps.train.pretrained_s2G, map_location="cpu", weights_only=True)["weight"],
+                torch.load(hps.train.pretrained_s2G, map_location="cpu", weights_only=False)["weight"],
                 strict=False,
             ) if torch.cuda.is_available() else net_g.load_state_dict(
-                torch.load(hps.train.pretrained_s2G, map_location="cpu", weights_only=True)["weight"],
+                torch.load(hps.train.pretrained_s2G, map_location="cpu", weights_only=False)["weight"],
                 strict=False,
             ))
         if hps.train.pretrained_s2D != "":
             if rank == 0:
                 logger.info("loaded pretrained %s" % hps.train.pretrained_s2D)
             print(net_d.module.load_state_dict(
-                torch.load(hps.train.pretrained_s2D, map_location="cpu", weights_only=True)["weight"]
+                torch.load(hps.train.pretrained_s2D, map_location="cpu", weights_only=False)["weight"]
             ) if torch.cuda.is_available() else net_d.load_state_dict(
-                torch.load(hps.train.pretrained_s2D, map_location="cpu", weights_only=True)["weight"]
+                torch.load(hps.train.pretrained_s2D, map_location="cpu", weights_only=False)["weight"]
             ))
 
     scheduler_g = torch.optim.lr_scheduler.ExponentialLR(optim_g, gamma=hps.train.lr_decay, last_epoch=-1)
