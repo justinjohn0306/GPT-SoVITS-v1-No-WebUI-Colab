@@ -23,6 +23,6 @@ PyYAML
 psutil
 jieba_fast
 jieba
-git+https://github.com/ishine/LangSegment.git
+#git+https://github.com/ishine/LangSegment.git
 Faster_Whisper
 wordsegment
